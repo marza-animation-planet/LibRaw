@@ -111,7 +111,10 @@ else:
 
 # LCMS2 setup
 
-rv = excons.ExternalLibRequire("lcms2")
+def Lcms2Defines(static):
+    return (["CMS_DLL"] if not static else [])
+
+rv = excons.ExternalLibRequire("lcms2", definesFunc=Lcms2Defines)
 if not rv["require"]:
     if with_lcms2:
         lcms2Static = (excons.GetArgument("lcms2-static", 1, int) != 0)
