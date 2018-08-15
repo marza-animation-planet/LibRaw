@@ -15217,7 +15217,6 @@ void CLASS parse_fuji(int offset)
     }
 // IB start
 #ifdef LIBRAW_LIBRARY_BUILD
-    }
 
     else if (tag == 0x110)
     {
@@ -15293,9 +15292,9 @@ void CLASS parse_fuji(int offset)
     else if (tag == 0x2410)
     {
       FORC4 imgdata.color.WB_Coeffs[LIBRAW_WBI_Flash][c ^ 1] = get2();
-#endif
-      // IB end
     }
+#endif
+// IB end
     else if (tag == 0xc000)
     /* 0xc000 tag versions, second ushort; valid if the first ushort is 0
     X100F	0x0259
