@@ -1,6 +1,6 @@
 /* -*- C++ -*-
  * File: identify.cpp
- * Copyright 2008-2018 LibRaw LLC (info@libraw.org)
+ * Copyright 2008-2021 LibRaw LLC (info@libraw.org)
  * Created: Sat Mar  8, 2008
  *
  * LibRaw C++ demo: emulates dcraw -i [-v]
@@ -22,17 +22,38 @@ it under the terms of the one of two licenses as you choose:
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <string>
+#include <list>
 
 #include "libraw/libraw.h"
 
-#ifdef WIN32
+#ifdef LIBRAW_WIN32_CALLS
 #define snprintf _snprintf
 #define strcasecmp stricmp
 #define strncasecmp strnicmp
 #endif
 
+#ifndef LIBRAW_WIN32_CALLS
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#ifndef MAX_PATH
+#define MAX_PATH PATH_MAX
+#endif
+#endif
+
+#ifdef _MSC_VER
+#if _MSC_VER < 1800 /* below MSVC 2013 */
+float roundf(float f) { return floorf(f + 0.5); }
+
+#endif
+#endif
+
 #define P1 MyCoolRawProcessor.imgdata.idata
 #define P2 MyCoolRawProcessor.imgdata.other
+#define P3 MyCoolRawProcessor.imgdata.makernotes.common
 
 #define mnLens MyCoolRawProcessor.imgdata.lens.makernotes
 #define exifLens MyCoolRawProcessor.imgdata.lens
@@ -43,54 +64,92 @@ it under the terms of the one of two licenses as you choose:
 #define C MyCoolRawProcessor.imgdata.color
 #define T MyCoolRawProcessor.imgdata.thumbnail
 
-#define Canon MyCoolRawProcessor.imgdata.makernotes.canon
-#define Hasselblad MyCoolRawProcessor.imgdata.makernotes.hasselblad
-#define Fuji MyCoolRawProcessor.imgdata.makernotes.fuji
-#define Nikon MyCoolRawProcessor.imgdata.makernotes.nikon
-#define Oly MyCoolRawProcessor.imgdata.makernotes.olympus
-#define Sony MyCoolRawProcessor.imgdata.makernotes.sony
+void print_verbose(FILE *, LibRaw &MyCoolRawProcessor, std::string &fn);
+void print_wbfun(FILE *, LibRaw &MyCoolRawProcessor, std::string &fn);
+void print_szfun(FILE *, LibRaw &MyCoolRawProcessor, std::string &fn);
+void print_unpackfun(FILE *, LibRaw &MyCoolRawProcessor, int print_frame, std::string &fn);
 
-const char *EXIF_LightSources[] = {
-    "Unknown",
-    "Daylight",
-    "Fluorescent",
-    "Tungsten",
-    "Flash",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Reserved",
-    "Fine Weather",
-    "Cloudy",
-    "Shade",
-    "Daylight Fluorescent D",
-    "Day White Fluorescent N",
-    "Cool White Fluorescent W",
-    "White Fluorescent WW",
-    "Warm White Fluorescent L",
-    "Illuminant A",
-    "Illuminant B",
-    "Illuminant C",
-    "D55",
-    "D65",
-    "D75",
-    "D50",
-    "ISO Studio Tungsten",
-};
 /*
 table of fluorescents:
 12 = FL-D; Daylight fluorescent (D 5700K – 7100K) (F1,F5)
 13 = FL-N; Day white fluorescent (N 4600K – 5400K) (F7,F8)
-14 = FL-W; Cool white fluorescent (W 3900K – 4500K) (F2,F6, office, store, warehouse)
-15 = FL-WW; White fluorescent (WW 3200K – 3700K) (F3, residential)
-16 = FL-L; Soft/Warm white fluorescent (L 2600K - 3250K) (F4, kitchen, bath)
+14 = FL-W; Cool white fluorescent (W 3900K – 4500K) (F2,F6, office,
+store,warehouse) 15 = FL-WW; White fluorescent (WW 3200K – 3700K) (F3,
+residential) 16 = FL-L; Soft/Warm white fluorescent (L 2600K - 3250K) (F4,
+kitchen, bath)
 */
-const char *WB_LightSources[] = {
-    "Unknown",  "Daylight", "Fluorescent",  "Tungsten",        "Flash",  "Reserved", "Reserved",
-    "Reserved", "Reserved", "Fine Weather", "Cloudy",          "Shade",  "FL-D",     "FL-N",
-    "FL-W",     "FL-WW",    "FL-L",         "Ill. A",          "Ill. B", "Ill. C",   "D55",
-    "D65",      "D75",      "D50",          "Studio Tungsten",
+
+static const struct
+{
+  const int NumId;
+  const char *StrId;
+  const char *hrStrId; // human-readable
+  const int aux_setting;
+} WBToStr[] = {
+    {LIBRAW_WBI_Unknown, "WBI_Unknown", "Unknown", 0},
+    {LIBRAW_WBI_Daylight, "WBI_Daylight", "Daylight", 0},
+    {LIBRAW_WBI_Fluorescent, "WBI_Fluorescent", "Fluorescent", 0},
+    {LIBRAW_WBI_Tungsten, "WBI_Tungsten", "Tungsten (Incandescent)", 0},
+    {LIBRAW_WBI_Flash, "WBI_Flash", "Flash", 0},
+    {LIBRAW_WBI_FineWeather, "WBI_FineWeather", "Fine Weather", 0},
+    {LIBRAW_WBI_Cloudy, "WBI_Cloudy", "Cloudy", 0},
+    {LIBRAW_WBI_Shade, "WBI_Shade", "Shade", 0},
+    {LIBRAW_WBI_FL_D, "WBI_FL_D", "Daylight Fluorescent", 0},
+    {LIBRAW_WBI_FL_N, "WBI_FL_N", "Day White Fluorescent", 0},
+    {LIBRAW_WBI_FL_W, "WBI_FL_W", "Cool White Fluorescent", 0},
+    {LIBRAW_WBI_FL_WW, "WBI_FL_WW", "White Fluorescent", 0},
+    {LIBRAW_WBI_FL_L, "WBI_FL_L", "Warm White Fluorescent", 0},
+    {LIBRAW_WBI_Ill_A, "WBI_Ill_A", "Illuminant A", 0},
+    {LIBRAW_WBI_Ill_B, "WBI_Ill_B", "Illuminant B", 0},
+    {LIBRAW_WBI_Ill_C, "WBI_Ill_C", "Illuminant C", 0},
+    {LIBRAW_WBI_D55, "WBI_D55", "D55", 0},
+    {LIBRAW_WBI_D65, "WBI_D65", "D65", 0},
+    {LIBRAW_WBI_D75, "WBI_D75", "D75", 0},
+    {LIBRAW_WBI_D50, "WBI_D50", "D50", 0},
+    {LIBRAW_WBI_StudioTungsten, "WBI_StudioTungsten", "ISO Studio Tungsten", 0},
+    {LIBRAW_WBI_BW, "WBI_BW", "BW", 0},
+    {LIBRAW_WBI_Other, "WBI_Other", "Other", 0},
+    {LIBRAW_WBI_Sunset, "WBI_Sunset", "Sunset", 1},
+    {LIBRAW_WBI_Underwater, "WBI_Underwater", "Underwater", 1},
+    {LIBRAW_WBI_FluorescentHigh, "WBI_FluorescentHigh", "Fluorescent High", 1},
+    {LIBRAW_WBI_HT_Mercury, "WBI_HT_Mercury", "HT Mercury", 1},
+    {LIBRAW_WBI_AsShot, "WBI_AsShot", "As Shot", 1},
+    {LIBRAW_WBI_Measured, "WBI_Measured", "Camera Measured", 1},
+    {LIBRAW_WBI_Auto, "WBI_Auto", "Camera Auto", 1},
+    {LIBRAW_WBI_Auto1, "WBI_Auto1", "Camera Auto 1", 1},
+    {LIBRAW_WBI_Auto2, "WBI_Auto2", "Camera Auto 2", 1},
+    {LIBRAW_WBI_Auto3, "WBI_Auto3", "Camera Auto 3", 1},
+    {LIBRAW_WBI_Auto4, "WBI_Auto4", "Camera Auto 4", 1},
+    {LIBRAW_WBI_Custom, "WBI_Custom", "Custom", 1},
+    {LIBRAW_WBI_Custom1, "WBI_Custom1", "Custom 1", 1},
+    {LIBRAW_WBI_Custom2, "WBI_Custom2", "Custom 2", 1},
+    {LIBRAW_WBI_Custom3, "WBI_Custom3", "Custom 3", 1},
+    {LIBRAW_WBI_Custom4, "WBI_Custom4", "Custom 4", 1},
+    {LIBRAW_WBI_Custom5, "WBI_Custom5", "Custom 5", 1},
+    {LIBRAW_WBI_Custom6, "WBI_Custom6", "Custom 6", 1},
+    {LIBRAW_WBI_PC_Set1, "WBI_PC_Set1", "PC Set 1", 1},
+    {LIBRAW_WBI_PC_Set2, "WBI_PC_Set2", "PC Set 2", 1},
+    {LIBRAW_WBI_PC_Set3, "WBI_PC_Set3", "PC Set 3", 1},
+    {LIBRAW_WBI_PC_Set4, "WBI_PC_Set4", "PC Set 4", 1},
+    {LIBRAW_WBI_PC_Set5, "WBI_PC_Set5", "PC Set 5", 1},
+    {LIBRAW_WBI_Kelvin, "WBI_Kelvin", "Kelvin", 1},
 };
+
+const char *WB_idx2str(unsigned WBi)
+{
+  for (int i = 0; i < int(sizeof WBToStr / sizeof *WBToStr); i++)
+    if (WBToStr[i].NumId == (int)WBi)
+      return WBToStr[i].StrId;
+  return 0;
+}
+
+const char *WB_idx2hrstr(unsigned WBi)
+{
+  for (int i = 0; i < int(sizeof WBToStr / sizeof *WBToStr); i++)
+    if (WBToStr[i].NumId == (int)WBi)
+      return WBToStr[i].hrStrId;
+  return 0;
+}
 
 void trimSpaces(char *s)
 {
@@ -107,737 +166,566 @@ void trimSpaces(char *s)
   memmove(s, p, l + 1);
 }
 
+void print_usage(const char *pname)
+{
+  printf("Usage: %s [options] inputfiles\n", pname);
+  printf("Options:\n"
+         "\t-w\tprint white balance\n"
+         "\t-u\tprint unpack function\n"
+         "\t-f\tprint frame size (only w/ -u)\n"
+         "\t-s\tprint output image size\n"
+         "\t-h\tforce half-size mode (only for -s)\n"
+         "\t-M\tdisable use of raw-embedded color data\n"
+         "\t+M\tforce use of raw-embedded color data\n"
+         "\t-L filename\tread input files list from filename\n"
+         "\t-o filename\toutput to filename\n");
+}
+
 int main(int ac, char *av[])
 {
-  int verbose = 0, ret, print_sz = 0, print_unpack = 0, print_frame = 0, print_wb = 0;
-  int compact = 0;
+  int ret;
+  int verbose = 0, print_sz = 0, print_unpack = 0, print_frame = 0, print_wb = 0;
   LibRaw MyCoolRawProcessor;
+  char *filelistfile = NULL;
+  char *outputfilename = NULL;
+  FILE *outfile = stdout;
+  std::vector<std::string> filelist;
+
+  filelist.reserve(ac - 1);
 
   for (int i = 1; i < ac; i++)
   {
     if (av[i][0] == '-')
     {
-      if (av[i][1] == 'c' && av[i][2] == 0)
-        compact++;
-      if (av[i][1] == 'v' && av[i][2] == 0)
+      if (!strcmp(av[i], "-v"))
         verbose++;
-      if (av[i][1] == 'w' && av[i][2] == 0)
+      if (!strcmp(av[i], "-w"))
         print_wb++;
-      if (av[i][1] == 'u' && av[i][2] == 0)
+      if (!strcmp(av[i], "-u"))
         print_unpack++;
-      if (av[i][1] == 's' && av[i][2] == 0)
+      if (!strcmp(av[i], "-s"))
         print_sz++;
-      if (av[i][1] == 'h' && av[i][2] == 0)
+      if (!strcmp(av[i], "-h"))
         O.half_size = 1;
-      if (av[i][1] == 'f' && av[i][2] == 0)
+      if (!strcmp(av[i], "-f"))
         print_frame++;
+      if (!strcmp(av[i], "-M"))
+        MyCoolRawProcessor.imgdata.params.use_camera_matrix = 0;
+      if (!strcmp(av[i], "-L") && i < ac - 1)
+      {
+        filelistfile = av[i + 1];
+        i++;
+      }
+      if (!strcmp(av[i], "-o") && i < ac - 1)
+      {
+        outputfilename = av[i + 1];
+        i++;
+      }
       continue;
     }
-    if ((ret = MyCoolRawProcessor.open_file(av[i])) != LIBRAW_SUCCESS)
+    else if (!strcmp(av[i], "+M"))
     {
-      printf("Cannot decode %s: %s\n", av[i], libraw_strerror(ret));
+      MyCoolRawProcessor.imgdata.params.use_camera_matrix = 3;
+      continue;
+    }
+    filelist.push_back(av[i]);
+  }
+  if (filelistfile)
+  {
+    char *p;
+    char path[MAX_PATH + 1];
+    FILE *f = fopen(filelistfile, "r");
+    if (f)
+    {
+      while (fgets(path, MAX_PATH, f))
+      {
+        if ((p = strchr(path, '\n')))
+          *p = 0;
+        if ((p = strchr(path, '\r')))
+          *p = 0;
+        filelist.push_back(path);
+      }
+      fclose(f);
+    }
+  }
+  if (filelist.size() < 1)
+  {
+    print_usage(av[0]);
+    return 1;
+  }
+  if (outputfilename)
+    outfile = fopen(outputfilename, "wt");
+
+  for (int i = 0; i < (int)filelist.size(); i++)
+  {
+    if ((ret = MyCoolRawProcessor.open_file(filelist[i].c_str())) != LIBRAW_SUCCESS)
+    {
+      fprintf(stderr, "Cannot decode %s: %s\n", filelist[i].c_str(), libraw_strerror(ret));
       continue; // no recycle, open_file will recycle
     }
+
     if (print_sz)
-    {
-      printf("%s\t%s\t%s\t%d\t%d\n", av[i], P1.make, P1.model, S.width, S.height);
-    }
+      print_szfun(outfile, MyCoolRawProcessor, filelist[i]);
     else if (verbose)
-    {
-      if ((ret = MyCoolRawProcessor.adjust_sizes_info_only()))
-      {
-        printf("Cannot decode %s: %s\n", av[i], libraw_strerror(ret));
-        continue; // no recycle, open_file will recycle
-      }
-
-      printf("\nFilename: %s\n", av[i]);
-      printf("Timestamp: %s", ctime(&(P2.timestamp)));
-      printf("Camera: %s %s ID: 0x%llx\n", P1.make, P1.model, mnLens.CamID);
-      if (ShootingInfo.BodySerial[0])
-      {
-        trimSpaces(ShootingInfo.BodySerial);
-        printf("Body serial: %s\n", ShootingInfo.BodySerial);
-      }
-      if (P2.artist[0])
-        printf("Owner: %s\n", P2.artist);
-      if (P1.dng_version)
-      {
-        printf("DNG Version: ");
-        for (int i = 24; i >= 0; i -= 8)
-          printf("%d%c", P1.dng_version >> i & 255, i ? '.' : '\n');
-      }
-      printf("\nEXIF:\n");
-      printf("\tMinFocal: %0.1f mm\n", exifLens.MinFocal);
-      printf("\tMaxFocal: %0.1f mm\n", exifLens.MaxFocal);
-      printf("\tMaxAp @MinFocal: f/%0.1f\n", exifLens.MaxAp4MinFocal);
-      printf("\tMaxAp @MaxFocal: f/%0.1f\n", exifLens.MaxAp4MaxFocal);
-      printf("\tMaxAperture @CurFocal: f/%0.1f\n", exifLens.EXIF_MaxAp);
-      printf("\tFocalLengthIn35mmFormat: %d mm\n", exifLens.FocalLengthIn35mmFormat);
-      printf("\tLensMake: %s\n", exifLens.LensMake);
-      printf("\tLens: %s\n", exifLens.Lens);
-      printf("\n");
-
-      printf("\nMakernotes:\n");
-      printf("\tDriveMode: %d\n", ShootingInfo.DriveMode);
-      printf("\tFocusMode: %d\n", ShootingInfo.FocusMode);
-      printf("\tMeteringMode: %d\n", ShootingInfo.MeteringMode);
-      printf("\tAFPoint: %d\n", ShootingInfo.AFPoint);
-      printf("\tExposureMode: %d\n", ShootingInfo.ExposureMode);
-      printf("\tImageStabilization: %d\n", ShootingInfo.ImageStabilization);
-      if (mnLens.body[0])
-      {
-        printf("\tMF Camera Body: %s\n", mnLens.body);
-      }
-      printf("\tCameraFormat: %d, ", mnLens.CameraFormat);
-      switch (mnLens.CameraFormat)
-      {
-      case 0:
-        printf("Undefined\n");
-        break;
-      case 1:
-        printf("APS-C\n");
-        break;
-      case 2:
-        printf("FF\n");
-        break;
-      case 3:
-        printf("MF\n");
-        break;
-      case 4:
-        printf("APS-H\n");
-        break;
-      case 5:
-        printf("1\"\n");
-        break;
-      case 8:
-        printf("4/3\n");
-        break;
-      default:
-        printf("Unknown\n");
-        break;
-      }
-      printf("\tCameraMount: %d, ", mnLens.CameraMount);
-      switch (mnLens.CameraMount)
-      {
-      case 0:
-        printf("Undefined or Fixed Lens\n");
-        break;
-      case 1:
-        printf("Sony/Minolta A\n");
-        break;
-      case 2:
-        printf("Sony E\n");
-        break;
-      case 3:
-        printf("Canon EF\n");
-        break;
-      case 4:
-        printf("Canon EF-S\n");
-        break;
-      case 5:
-        printf("Canon EF-M\n");
-        break;
-      case 6:
-        printf("Nikon F\n");
-        break;
-      case 7:
-        printf("Nikon CX\n");
-        break;
-      case 8:
-        printf("4/3\n");
-        break;
-      case 9:
-        printf("m4/3\n");
-        break;
-      case 10:
-        printf("Pentax K\n");
-        break;
-      case 11:
-        printf("Pentax Q\n");
-        break;
-      case 12:
-        printf("Pentax 645\n");
-        break;
-      case 13:
-        printf("Fuji X\n");
-        break;
-      case 14:
-        printf("Leica M\n");
-        break;
-      case 15:
-        printf("Leica R\n");
-        break;
-      case 16:
-        printf("Leica S\n");
-        break;
-      case 17:
-        printf("Samsung NX\n");
-        break;
-      case 19:
-        printf("Samsung NX-M\n");
-        break;
-      case 99:
-        printf("Fixed Lens\n");
-        break;
-      default:
-        printf("Unknown\n");
-        break;
-      }
-
-      if (mnLens.LensID == -1)
-      {
-        printf("\tLensID: n/a\n");
-      }
-      else
-      {
-        printf("\tLensID: %llu 0x%0llx\n", mnLens.LensID, mnLens.LensID);
-      }
-      printf("\tLens: %s\n", mnLens.Lens);
-      printf("\tLensFormat: %d, ", mnLens.LensFormat);
-      switch (mnLens.LensFormat)
-      {
-      case 0:
-        printf("Undefined\n");
-        break;
-      case 1:
-        printf("APS-C\n");
-        break;
-      case 2:
-        printf("FF\n");
-        break;
-      case 3:
-        printf("MF\n");
-        break;
-      case 8:
-        printf("4/3\n");
-        break;
-      default:
-        printf("Unknown\n");
-        break;
-      }
-      printf("\tLensMount: %d, ", mnLens.LensMount);
-      switch (mnLens.LensMount)
-      {
-      case 0:
-        printf("Undefined or Fixed Lens\n");
-        break;
-      case 1:
-        printf("Sony/Minolta A\n");
-        break;
-      case 2:
-        printf("Sony E\n");
-        break;
-      case 3:
-        printf("Canon EF\n");
-        break;
-      case 4:
-        printf("Canon EF-S\n");
-        break;
-      case 5:
-        printf("Canon EF-M\n");
-        break;
-      case 6:
-        printf("Nikon F\n");
-        break;
-      case 7:
-        printf("Nikon CX\n");
-        break;
-      case 8:
-        printf("4/3\n");
-        break;
-      case 9:
-        printf("m4/3\n");
-        break;
-      case 10:
-        printf("Pentax K\n");
-        break;
-      case 11:
-        printf("Pentax Q\n");
-        break;
-      case 12:
-        printf("Pentax 645\n");
-        break;
-      case 13:
-        printf("Fuji X\n");
-        break;
-      case 14:
-        printf("Leica M\n");
-        break;
-      case 15:
-        printf("Leica R\n");
-        break;
-      case 16:
-        printf("Leica S\n");
-        break;
-      case 17:
-        printf("Samsung NX\n");
-        break;
-      case 18:
-        printf("Ricoh module\n");
-        break;
-      case 99:
-        printf("Fixed Lens\n");
-        break;
-      default:
-        printf("Unknown\n");
-        break;
-      }
-      printf("\tFocalType: %d, ", mnLens.FocalType);
-      switch (mnLens.FocalType)
-      {
-      case 0:
-        printf("Undefined\n");
-        break;
-      case 1:
-        printf("Fixed Focal\n");
-        break;
-      case 2:
-        printf("Zoom\n");
-        break;
-      default:
-        printf("Unknown\n");
-        break;
-      }
-      printf("\tLensFeatures_pre: %s\n", mnLens.LensFeatures_pre);
-      printf("\tLensFeatures_suf: %s\n", mnLens.LensFeatures_suf);
-      printf("\tMinFocal: %0.1f mm\n", mnLens.MinFocal);
-      printf("\tMaxFocal: %0.1f mm\n", mnLens.MaxFocal);
-      printf("\tMaxAp @MinFocal: f/%0.1f\n", mnLens.MaxAp4MinFocal);
-      printf("\tMaxAp @MaxFocal: f/%0.1f\n", mnLens.MaxAp4MaxFocal);
-      printf("\tMinAp @MinFocal: f/%0.1f\n", mnLens.MinAp4MinFocal);
-      printf("\tMinAp @MaxFocal: f/%0.1f\n", mnLens.MinAp4MaxFocal);
-      printf("\tMaxAp: f/%0.1f\n", mnLens.MaxAp);
-      printf("\tMinAp: f/%0.1f\n", mnLens.MinAp);
-      printf("\tCurFocal: %0.1f mm\n", mnLens.CurFocal);
-      printf("\tCurAp: f/%0.1f\n", mnLens.CurAp);
-      printf("\tMaxAp @CurFocal: f/%0.1f\n", mnLens.MaxAp4CurFocal);
-      printf("\tMinAp @CurFocal: f/%0.1f\n", mnLens.MinAp4CurFocal);
-
-      if (exifLens.makernotes.FocalLengthIn35mmFormat > 1.0f)
-        printf("\tFocalLengthIn35mmFormat: %0.1f mm\n", exifLens.makernotes.FocalLengthIn35mmFormat);
-
-      if (exifLens.nikon.NikonEffectiveMaxAp > 0.1f)
-        printf("\tNikonEffectiveMaxAp: f/%0.1f\n", exifLens.nikon.NikonEffectiveMaxAp);
-
-      if (exifLens.makernotes.LensFStops > 0.1f)
-        printf("\tLensFStops @CurFocal: %0.2f\n", exifLens.makernotes.LensFStops);
-
-      printf("\tTeleconverterID: %lld\n", mnLens.TeleconverterID);
-      printf("\tTeleconverter: %s\n", mnLens.Teleconverter);
-      printf("\tAdapterID: %lld\n", mnLens.AdapterID);
-      printf("\tAdapter: %s\n", mnLens.Adapter);
-      printf("\tAttachmentID: %lld\n", mnLens.AttachmentID);
-      printf("\tAttachment: %s\n", mnLens.Attachment);
-      printf("\n");
-
-      printf("ISO speed: %d\n", (int)P2.iso_speed);
-      if (P2.real_ISO > 0.1f)
-        printf("real ISO speed: %d\n", (int)P2.real_ISO);
-      printf("Shutter: ");
-      if (P2.shutter > 0 && P2.shutter < 1)
-        P2.shutter = (printf("1/"), 1 / P2.shutter);
-      printf("%0.1f sec\n", P2.shutter);
-      printf("Aperture: f/%0.1f\n", P2.aperture);
-      printf("Focal length: %0.1f mm\n", P2.focal_len);
-      if (P2.exifAmbientTemperature > -273.15f)
-        printf("Ambient temperature (exif data): %6.2f° C\n", P2.exifAmbientTemperature);
-      if (P2.CameraTemperature > -273.15f)
-        printf("Camera temperature: %6.2f° C\n", P2.CameraTemperature);
-      if (P2.SensorTemperature > -273.15f)
-        printf("Sensor temperature: %6.2f° C\n", P2.SensorTemperature);
-      if (P2.SensorTemperature2 > -273.15f)
-        printf("Sensor temperature2: %6.2f° C\n", P2.SensorTemperature2);
-      if (P2.LensTemperature > -273.15f)
-        printf("Lens temperature: %6.2f° C\n", P2.LensTemperature);
-      if (P2.AmbientTemperature > -273.15f)
-        printf("Ambient temperature: %6.2f° C\n", P2.AmbientTemperature);
-      if (P2.BatteryTemperature > -273.15f)
-        printf("Battery temperature: %6.2f° C\n", P2.BatteryTemperature);
-      if (P2.FlashGN > 1.0f)
-        printf("Flash Guide Number: %6.2f\n", P2.FlashGN);
-      printf("Flash exposure compensation: %0.2f EV\n", P2.FlashEC);
-      if (C.profile)
-        printf("Embedded ICC profile: yes, %d bytes\n", C.profile_length);
-      else
-        printf("Embedded ICC profile: no\n");
-
-      if (C.baseline_exposure > -999.f)
-        printf("Baseline exposure: %04.3f\n", C.baseline_exposure);
-
-      printf("Number of raw images: %d\n", P1.raw_count);
-      if (Fuji.FujiExpoMidPointShift > -999.f)
-        printf("Fuji Exposure shift: %04.3f\n", Fuji.FujiExpoMidPointShift);
-
-      if (Fuji.FujiDynamicRange != 0xffff)
-        printf("Fuji Dynamic Range: %d\n", Fuji.FujiDynamicRange);
-      if (Fuji.FujiFilmMode != 0xffff)
-        printf("Fuji Film Mode: %d\n", Fuji.FujiFilmMode);
-      if (Fuji.FujiDynamicRangeSetting != 0xffff)
-        printf("Fuji Dynamic Range Setting: %d\n", Fuji.FujiDynamicRangeSetting);
-      if (Fuji.FujiDevelopmentDynamicRange != 0xffff)
-        printf("Fuji Development Dynamic Range: %d\n", Fuji.FujiDevelopmentDynamicRange);
-      if (Fuji.FujiAutoDynamicRange != 0xffff)
-        printf("Fuji Auto Dynamic Range: %d\n", Fuji.FujiAutoDynamicRange);
-
-      if (S.pixel_aspect != 1)
-        printf("Pixel Aspect Ratio: %0.6f\n", S.pixel_aspect);
-      if (T.tlength)
-        printf("Thumb size:  %4d x %d\n", T.twidth, T.theight);
-      printf("Full size:   %4d x %d\n", S.raw_width, S.raw_height);
-
-      if (S.raw_crop.cwidth)
-      {
-        printf("Raw crop, width x height: %4d x %d ", S.raw_crop.cwidth, S.raw_crop.cheight);
-        if (S.raw_crop.cleft != 0xffff)
-          printf("left: %d ", S.raw_crop.cleft);
-        if (S.raw_crop.ctop != 0xffff)
-          printf("top: %d", S.raw_crop.ctop);
-        printf("\n");
-      }
-
-      printf("Image size:  %4d x %d\n", S.width, S.height);
-      printf("Output size: %4d x %d\n", S.iwidth, S.iheight);
-
-      if (Canon.SensorWidth)
-        printf("SensorWidth          = %d\n", Canon.SensorWidth);
-      if (Canon.SensorHeight)
-        printf("SensorHeight         = %d\n", Canon.SensorHeight);
-      if (Canon.SensorLeftBorder)
-        printf("SensorLeftBorder     = %d\n", Canon.SensorLeftBorder);
-      if (Canon.SensorTopBorder)
-        printf("SensorTopBorder      = %d\n", Canon.SensorTopBorder);
-      if (Canon.SensorRightBorder)
-        printf("SensorRightBorder    = %d\n", Canon.SensorRightBorder);
-      if (Canon.SensorBottomBorder)
-        printf("SensorBottomBorder   = %d\n", Canon.SensorBottomBorder);
-      if (Canon.BlackMaskLeftBorder)
-        printf("BlackMaskLeftBorder  = %d\n", Canon.BlackMaskLeftBorder);
-      if (Canon.BlackMaskTopBorder)
-        printf("BlackMaskTopBorder   = %d\n", Canon.BlackMaskTopBorder);
-      if (Canon.BlackMaskRightBorder)
-        printf("BlackMaskRightBorder = %d\n", Canon.BlackMaskRightBorder);
-      if (Canon.BlackMaskBottomBorder)
-        printf("BlackMaskBottomBorder= %d\n", Canon.BlackMaskBottomBorder);
-      if (Canon.ChannelBlackLevel[0])
-        printf("ChannelBlackLevel (from makernotes): %d %d %d %d\n", Canon.ChannelBlackLevel[0],
-               Canon.ChannelBlackLevel[1], Canon.ChannelBlackLevel[2], Canon.ChannelBlackLevel[3]);
-
-      if (Hasselblad.BaseISO)
-        printf("Hasselblad base ISO: %d\n", Hasselblad.BaseISO);
-      if (Hasselblad.Gain)
-        printf("Hasselblad gain: %g\n", Hasselblad.Gain);
-
-      if (Oly.OlympusCropID != -1)
-      {
-        printf("Olympus aspect ID: %d\nOlympus crop", Oly.OlympusCropID);
-        for (int c = 0; c < 4; c++)
-          printf(" %d", Oly.OlympusFrame[c]);
-        printf("\n");
-      }
-
-      printf("Raw colors: %d", P1.colors);
-      if (P1.filters)
-      {
-        printf("\nFilter pattern: ");
-        if (!P1.cdesc[3])
-          P1.cdesc[3] = 'G';
-        for (int i = 0; i < 16; i++)
-          putchar(P1.cdesc[MyCoolRawProcessor.fcol(i >> 1, i & 1)]);
-      }
-      if (C.linear_max[0] != 0)
-      {
-        printf("\nHighlight linearity limits:");
-        for (int c = 0; c < 4; c++)
-          printf(" %ld", C.linear_max[c]);
-      }
-      if (C.cam_mul[0] > 0)
-      {
-        printf("\nMakernotes 'As shot' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %f", C.cam_mul[c]);
-      }
-
-      for (int cnt = 0; cnt < 25; cnt++)
-      {
-        if (C.WB_Coeffs[cnt][0] > 0)
-        {
-          printf("\nMakernotes '%s' WB multipliers:", EXIF_LightSources[cnt]);
-          for (int c = 0; c < 4; c++)
-            printf(" %d", C.WB_Coeffs[cnt][c]);
-        }
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Sunset][0] > 0)
-      {
-        printf("\nMakernotes 'Sunset' multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Sunset][c]);
-      }
-
-      if (C.WB_Coeffs[LIBRAW_WBI_Other][0] > 0)
-      {
-        printf("\nMakernotes 'Other' multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Other][c]);
-      }
-
-      if (C.WB_Coeffs[LIBRAW_WBI_Auto][0] > 0)
-      {
-        printf("\nMakernotes 'Camera Auto' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Auto][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Measured][0] > 0)
-      {
-        printf("\nMakernotes 'Camera Measured' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Measured][c]);
-      }
-
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom][0] > 0)
-      {
-        printf("\nMakernotes 'Custom' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom1][0] > 0)
-      {
-        printf("\nMakernotes 'Custom1' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom1][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom2][0] > 0)
-      {
-        printf("\nMakernotes 'Custom2' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom2][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom3][0] > 0)
-      {
-        printf("\nMakernotes 'Custom3' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom3][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom4][0] > 0)
-      {
-        printf("\nMakernotes 'Custom4' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom4][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom5][0] > 0)
-      {
-        printf("\nMakernotes 'Custom5' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom5][c]);
-      }
-      if (C.WB_Coeffs[LIBRAW_WBI_Custom6][0] > 0)
-      {
-        printf("\nMakernotes 'Custom6' WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %d", C.WB_Coeffs[LIBRAW_WBI_Custom6][c]);
-      }
-
-      if ((Nikon.ME_WB[0] != 0.0f) && (Nikon.ME_WB[0] != 1.0f))
-      {
-        printf("\nNikon multi-exposure WB multipliers:");
-        for (int c = 0; c < 4; c++)
-          printf(" %f", Nikon.ME_WB[c]);
-      }
-
-      if (C.rgb_cam[0][0] > 0.0001 && P1.colors > 1)
-      {
-        printf("\nCamera2RGB matrix:\n");
-        for (int i = 0; i < P1.colors; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.rgb_cam[i][0], C.rgb_cam[i][1], C.rgb_cam[i][2]);
-      }
-      printf("\nXYZ->CamRGB matrix:\n");
-      for (int i = 0; i < P1.colors; i++)
-        printf("%6.4f\t%6.4f\t%6.4f\n", C.cam_xyz[i][0], C.cam_xyz[i][1], C.cam_xyz[i][2]);
-
-      if (C.dng_color[0].illuminant < 0xffff)
-        printf("\nDNG Illuminant 1: %s", EXIF_LightSources[C.dng_color[0].illuminant]);
-      if (C.dng_color[1].illuminant < 0xffff)
-        printf("\nDNG Illuminant 2: %s", EXIF_LightSources[C.dng_color[1].illuminant]);
-
-      if (fabsf(C.P1_color[0].romm_cam[0]) > 0)
-      {
-        printf("\nPhaseOne Matrix1:\n");
-        for (int i = 0; i < 3; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.P1_color[0].romm_cam[i * 3], C.P1_color[0].romm_cam[i * 3 + 1],
-                 C.P1_color[0].romm_cam[i * 3 + 2]);
-      }
-
-      if (fabsf(C.P1_color[1].romm_cam[0]) > 0)
-      {
-        printf("\nPhaseOne Matrix2:\n");
-        for (int i = 0; i < 3; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.P1_color[1].romm_cam[i * 3], C.P1_color[1].romm_cam[i * 3 + 1],
-                 C.P1_color[1].romm_cam[i * 3 + 2]);
-      }
-
-      if (fabsf(C.cmatrix[0][0]) > 0)
-      {
-        printf("\ncamRGB -> sRGB Matrix:\n");
-        for (int i = 0; i < P1.colors; i++)
-        {
-          for (int j = 0; j < P1.colors; j++)
-            printf("%6.4f\t", C.cmatrix[j][i]);
-          printf("\n");
-        }
-      }
-
-      if (fabsf(C.ccm[0][0]) > 0)
-      {
-        printf("\nColor Correction Matrix:\n");
-        for (int i = 0; i < P1.colors; i++)
-        {
-          for (int j = 0; j < P1.colors; j++)
-            printf("%6.4f\t", C.ccm[j][i]);
-          printf("\n");
-        }
-      }
-      if (fabsf(C.dng_color[0].colormatrix[0][0]) > 0)
-      {
-        printf("\nDNG color matrix 1:\n");
-        for (int i = 0; i < P1.colors; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.dng_color[0].colormatrix[i][0], C.dng_color[0].colormatrix[i][1],
-                 C.dng_color[0].colormatrix[i][2]);
-      }
-      if (fabsf(C.dng_color[1].colormatrix[0][0]) > 0)
-      {
-        printf("\nDNG color matrix 2:\n");
-        for (int i = 0; i < P1.colors; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.dng_color[1].colormatrix[i][0], C.dng_color[1].colormatrix[i][1],
-                 C.dng_color[1].colormatrix[i][2]);
-      }
-
-      if (fabsf(C.dng_color[0].calibration[0][0]) > 0)
-      {
-        printf("\nDNG calibration matrix 1:\n");
-        for (int i = 0; i < P1.colors; i++)
-        {
-          for (int j = 0; j < P1.colors; j++)
-            printf("%6.4f\t", C.dng_color[0].calibration[j][i]);
-          printf("\n");
-        }
-      }
-      if (fabsf(C.dng_color[1].calibration[0][0]) > 0)
-      {
-        printf("\nDNG calibration matrix 2:\n");
-        for (int i = 0; i < P1.colors; i++)
-        {
-          for (int j = 0; j < P1.colors; j++)
-            printf("%6.4f\t", C.dng_color[1].calibration[j][i]);
-          printf("\n");
-        }
-      }
-
-      if (fabsf(C.dng_color[0].forwardmatrix[0][0]) > 0)
-      {
-        printf("\nDNG forward matrix 1:\n");
-        for (int i = 0; i < P1.colors; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.dng_color[0].forwardmatrix[0][i], C.dng_color[0].forwardmatrix[1][i],
-                 C.dng_color[0].forwardmatrix[2][i]);
-      }
-      if (fabsf(C.dng_color[1].forwardmatrix[0][0]) > 0)
-      {
-        printf("\nDNG forward matrix 2:\n");
-        for (int i = 0; i < P1.colors; i++)
-          printf("%6.4f\t%6.4f\t%6.4f\n", C.dng_color[1].forwardmatrix[0][i], C.dng_color[1].forwardmatrix[1][i],
-                 C.dng_color[1].forwardmatrix[2][i]);
-      }
-
-      printf("\nDerived D65 multipliers:");
-      for (int c = 0; c < P1.colors; c++)
-        printf(" %f", C.pre_mul[c]);
-      printf("\n");
-
-      if (Sony.Sony0x9400_version)
-        printf("\nSONY Sequence data, tag 0x9400 version %x\n\
-\tReleaseMode2: %d\n\
-\tSequenceImageNumber: %d (starts at zero)\n\
-\tSequenceLength1: %d shot(s)\n\
-\tSequenceFileNumber: %d (starts at zero, exiftool starts at 1)\n\
-\tSequenceLength2: %d file(s)\n",
-               Sony.Sony0x9400_version, Sony.Sony0x9400_ReleaseMode2, Sony.Sony0x9400_SequenceImageNumber,
-               Sony.Sony0x9400_SequenceLength1, Sony.Sony0x9400_SequenceFileNumber, Sony.Sony0x9400_SequenceLength2);
-    }
+      print_verbose(outfile, MyCoolRawProcessor, filelist[i]);
+    else if (print_unpack)
+      print_unpackfun(outfile, MyCoolRawProcessor, print_frame, filelist[i]);
+    else if (print_wb)
+      print_wbfun(outfile, MyCoolRawProcessor, filelist[i]);
     else
-    {
-      if (print_unpack)
-      {
-        char frame[48] = "";
-        if (print_frame)
-        {
-          ushort right_margin = S.raw_width - S.width - S.left_margin;
-          ushort bottom_margin = S.raw_height - S.height - S.top_margin;
-          snprintf(frame, 48, "F=%dx%dx%dx%d RS=%dx%d", S.left_margin, S.top_margin, right_margin, bottom_margin,
-                   S.raw_width, S.raw_height);
-          printf("%s\t%s\t%s\t%s/%s\n", av[i], MyCoolRawProcessor.unpack_function_name(), frame, P1.make, P1.model);
-        }
-      }
-      else if (print_wb)
-      {
-        printf("// %s %s\n", P1.make, P1.model);
-        for (int cnt = 0; cnt < 25; cnt++)
-          if (C.WB_Coeffs[cnt][0])
-          {
-            printf("{\"%s\", \"%s\", %d, {%6.5ff, 1.0f, %6.5ff, ", P1.make, P1.model, cnt,
-                   C.WB_Coeffs[cnt][0] / (float)C.WB_Coeffs[cnt][1], C.WB_Coeffs[cnt][2] / (float)C.WB_Coeffs[cnt][1]);
-            if (C.WB_Coeffs[cnt][1] == C.WB_Coeffs[cnt][3])
-              printf("1.0f}},\n");
-            else
-              printf("%6.5ff}},\n", C.WB_Coeffs[cnt][3] / (float)C.WB_Coeffs[cnt][1]);
-          }
-        if (C.WB_Coeffs[LIBRAW_WBI_Sunset][0])
-        {
-          printf("{\"%s\", \"%s\", %d, {%6.5ff, 1.0f, %6.5ff, ", P1.make, P1.model, LIBRAW_WBI_Sunset,
-                 C.WB_Coeffs[LIBRAW_WBI_Sunset][0] / (float)C.WB_Coeffs[LIBRAW_WBI_Sunset][1],
-                 C.WB_Coeffs[LIBRAW_WBI_Sunset][2] / (float)C.WB_Coeffs[LIBRAW_WBI_Sunset][1]);
-          if (C.WB_Coeffs[LIBRAW_WBI_Sunset][1] == C.WB_Coeffs[LIBRAW_WBI_Sunset][3])
-            printf("1.0f}},\n");
-          else
-            printf("%6.5ff}},\n", C.WB_Coeffs[LIBRAW_WBI_Sunset][3] / (float)C.WB_Coeffs[LIBRAW_WBI_Sunset][1]);
-        }
-
-        for (int cnt = 0; cnt < 64; cnt++)
-          if (C.WBCT_Coeffs[cnt][0])
-          {
-            printf("{\"%s\", \"%s\", %d, {%6.5ff, 1.0f, %6.5ff, ", P1.make, P1.model, (int)C.WBCT_Coeffs[cnt][0],
-                   C.WBCT_Coeffs[cnt][1] / C.WBCT_Coeffs[cnt][2], C.WBCT_Coeffs[cnt][3] / C.WBCT_Coeffs[cnt][2]);
-            if (C.WBCT_Coeffs[cnt][2] == C.WBCT_Coeffs[cnt][4])
-              printf("1.0f}},\n");
-            else
-              printf("%6.5ff}},\n", C.WBCT_Coeffs[cnt][4] / C.WBCT_Coeffs[cnt][2]);
-          }
-          else
-            break;
-        printf("\n");
-      }
-      else if (compact)
-      {
-        trimSpaces(P1.make);
-        trimSpaces(P1.model);
-        trimSpaces(C.model2);
-        trimSpaces(ShootingInfo.BodySerial);
-        trimSpaces(ShootingInfo.InternalBodySerial);
-        printf("%s=%s", P1.make, P1.model);
-        if (ShootingInfo.BodySerial[0] && !(ShootingInfo.BodySerial[0] == 48 && !ShootingInfo.BodySerial[1]))
-          printf("=Body#: %s", ShootingInfo.BodySerial);
-        else if (C.model2[0] && (!strncasecmp(P1.make, "Kodak", 5) || !strcmp(P1.model, "EOS D2000C")))
-          printf("=Body#: %s", C.model2);
-        if (ShootingInfo.InternalBodySerial[0])
-          printf("=Assy#: %s", ShootingInfo.InternalBodySerial);
-        if (exifLens.LensSerial[0])
-          printf("=Lens#: %s", exifLens.LensSerial);
-        if (exifLens.InternalLensSerial[0])
-          printf("=LensAssy#: %s", exifLens.InternalLensSerial);
-        printf("=\n");
-      }
-      else
-        printf("%s is a %s %s image.\n", av[i], P1.make, P1.model);
-    }
+      fprintf(outfile, "%s is a %s %s image.\n", filelist[i].c_str(), P1.make, P1.model);
 
     MyCoolRawProcessor.recycle();
   } // endfor
   return 0;
+}
+
+#define PRINTMATRIX3x4(of, mat, clrs)                                                                                  \
+  do                                                                                                                   \
+  {                                                                                                                    \
+    for (int r = 0; r < 3; r++)                                                                                        \
+      if (clrs == 4)                                                                                                   \
+        fprintf(of, "%6.4f\t%6.4f\t%6.4f\t%6.4f\n", mat[r][0], mat[r][1], mat[r][2], mat[r][3]);                       \
+      else                                                                                                             \
+        fprintf(of, "%6.4f\t%6.4f\t%6.4f\n", mat[r][0], mat[r][1], mat[r][2]);                                         \
+  } while (0)
+
+#define PRINTMATRIX4x3(of, mat, clrs)                                                                                  \
+  do                                                                                                                   \
+  {                                                                                                                    \
+    for (int r = 0; r < clrs && r < 4; r++)                                                                            \
+      fprintf(of, "%6.4f\t%6.4f\t%6.4f\n", mat[r][0], mat[r][1], mat[r][2]);                                           \
+  } while (0)
+
+void print_verbose(FILE *outfile, LibRaw &MyCoolRawProcessor, std::string &fn)
+{
+  int WBi;
+  float denom;
+  int ret;
+
+  if ((ret = MyCoolRawProcessor.adjust_sizes_info_only()))
+  {
+    fprintf(outfile, "Cannot decode %s: %s\n", fn.c_str(), libraw_strerror(ret));
+    return; // no recycle, open_file will recycle
+  }
+
+  fprintf(outfile, "\nFilename: %s\n", fn.c_str());
+  if (C.OriginalRawFileName[0])
+    fprintf(outfile, "OriginalRawFileName: =%s=\n", C.OriginalRawFileName);
+  fprintf(outfile, "Timestamp: %s", ctime(&(P2.timestamp)));
+  fprintf(outfile, "Camera: %s %s ID: 0x%llx\n", P1.make, P1.model, mnLens.CamID);
+  fprintf(outfile, "Normalized Make/Model: =%s/%s= ", P1.normalized_make, P1.normalized_model);
+  fprintf(outfile, "CamMaker ID: %d\n", P1.maker_index);
+
+  {
+    int i = 0;
+    char sep[] = ", ";
+    if (C.UniqueCameraModel[0])
+    {
+      i++;
+      fprintf(outfile, "UniqueCameraModel: =%s=", C.UniqueCameraModel);
+    }
+    if (C.LocalizedCameraModel[0])
+    {
+      if (i)
+      {
+        fprintf(outfile, "%s", sep);
+        i++;
+      }
+      fprintf(outfile, "LocalizedCameraModel: =%s=", C.LocalizedCameraModel);
+    }
+    if (i)
+    {
+      fprintf(outfile, "\n");
+      i = 0;
+    }
+    if (C.ImageUniqueID[0])
+    {
+      if (i)
+        fprintf(outfile, "%s", sep);
+      i++;
+      fprintf(outfile, "ImageUniqueID: =%s=", C.ImageUniqueID);
+    }
+    if (C.RawDataUniqueID[0])
+    {
+      if (i)
+        fprintf(outfile, "%s", sep);
+      i++;
+      fprintf(outfile, "RawDataUniqueID: =%s=", C.RawDataUniqueID);
+    }
+    if (i)
+      fprintf(outfile, "\n");
+  }
+
+  if (ShootingInfo.BodySerial[0] && strcmp(ShootingInfo.BodySerial, "0"))
+  {
+    trimSpaces(ShootingInfo.BodySerial);
+    fprintf(outfile, "Body#: %s", ShootingInfo.BodySerial);
+  }
+  else if (C.model2[0] && (!strncasecmp(P1.normalized_make, "Kodak", 5)))
+  {
+    trimSpaces(C.model2);
+    fprintf(outfile, "Body#: %s", C.model2);
+  }
+  if (ShootingInfo.InternalBodySerial[0])
+  {
+    trimSpaces(ShootingInfo.InternalBodySerial);
+    fprintf(outfile, " BodyAssy#: %s", ShootingInfo.InternalBodySerial);
+  }
+  if (exifLens.LensSerial[0])
+  {
+    trimSpaces(exifLens.LensSerial);
+    fprintf(outfile, " Lens#: %s", exifLens.LensSerial);
+  }
+  if (exifLens.InternalLensSerial[0])
+  {
+    trimSpaces(exifLens.InternalLensSerial);
+    fprintf(outfile, " LensAssy#: %s", exifLens.InternalLensSerial);
+  }
+  if (P2.artist[0])
+    fprintf(outfile, " Owner: %s\n", P2.artist);
+  if (P1.dng_version)
+  {
+    fprintf(outfile, " DNG Version: ");
+    for (int i = 24; i >= 0; i -= 8)
+      fprintf(outfile, "%d%c", P1.dng_version >> i & 255, i ? '.' : '\n');
+  }
+  fprintf(outfile, "\nEXIF:\n");
+  fprintf(outfile, "\tMinFocal: %0.1f mm\n", exifLens.MinFocal);
+  fprintf(outfile, "\tMaxFocal: %0.1f mm\n", exifLens.MaxFocal);
+  fprintf(outfile, "\tMaxAp @MinFocal: f/%0.1f\n", exifLens.MaxAp4MinFocal);
+  fprintf(outfile, "\tMaxAp @MaxFocal: f/%0.1f\n", exifLens.MaxAp4MaxFocal);
+  fprintf(outfile, "\tCurFocal: %0.1f mm\n", P2.focal_len);
+  fprintf(outfile, "\tMaxAperture @CurFocal: f/%0.1f\n", exifLens.EXIF_MaxAp);
+  fprintf(outfile, "\tFocalLengthIn35mmFormat: %d mm\n", exifLens.FocalLengthIn35mmFormat);
+  fprintf(outfile, "\tLensMake: %s\n", exifLens.LensMake);
+  fprintf(outfile, "\tLens: %s\n", exifLens.Lens);
+  fprintf(outfile, "\n");
+
+  fprintf(outfile, "\nMakernotes:\n");
+  fprintf(outfile, "\tDriveMode: %d\n", ShootingInfo.DriveMode);
+  fprintf(outfile, "\tFocusMode: %d\n", ShootingInfo.FocusMode);
+  fprintf(outfile, "\tMeteringMode: %d\n", ShootingInfo.MeteringMode);
+  fprintf(outfile, "\tAFPoint: %d\n", ShootingInfo.AFPoint);
+  fprintf(outfile, "\tExposureMode: %d\n", ShootingInfo.ExposureMode);
+  fprintf(outfile, "\tExposureProgram: %d\n", ShootingInfo.ExposureProgram);
+  fprintf(outfile, "\tImageStabilization: %d\n", ShootingInfo.ImageStabilization);
+
+  fprintf(outfile, "\tLens: %s\n", mnLens.Lens);
+  fprintf(outfile, "\tLensFormat: %d, ", mnLens.LensFormat);
+
+  fprintf(outfile, "\tLensMount: %d, ", mnLens.LensMount);
+  fprintf(outfile, "\tFocalType: %d, ", mnLens.FocalType);
+  switch (mnLens.FocalType)
+  {
+  case LIBRAW_FT_UNDEFINED:
+    fprintf(outfile, "Undefined\n");
+    break;
+  case LIBRAW_FT_PRIME_LENS:
+    fprintf(outfile, "Prime lens\n");
+    break;
+  case LIBRAW_FT_ZOOM_LENS:
+    fprintf(outfile, "Zoom lens\n");
+    break;
+  default:
+    fprintf(outfile, "Unknown\n");
+    break;
+  }
+  fprintf(outfile, "\tLensFeatures_pre: %s\n", mnLens.LensFeatures_pre);
+  fprintf(outfile, "\tLensFeatures_suf: %s\n", mnLens.LensFeatures_suf);
+  fprintf(outfile, "\tMinFocal: %0.1f mm\n", mnLens.MinFocal);
+  fprintf(outfile, "\tMaxFocal: %0.1f mm\n", mnLens.MaxFocal);
+  fprintf(outfile, "\tMaxAp @MinFocal: f/%0.1f\n", mnLens.MaxAp4MinFocal);
+  fprintf(outfile, "\tMaxAp @MaxFocal: f/%0.1f\n", mnLens.MaxAp4MaxFocal);
+  fprintf(outfile, "\tMinAp @MinFocal: f/%0.1f\n", mnLens.MinAp4MinFocal);
+  fprintf(outfile, "\tMinAp @MaxFocal: f/%0.1f\n", mnLens.MinAp4MaxFocal);
+  fprintf(outfile, "\tMaxAp: f/%0.1f\n", mnLens.MaxAp);
+  fprintf(outfile, "\tMinAp: f/%0.1f\n", mnLens.MinAp);
+  fprintf(outfile, "\tCurFocal: %0.1f mm\n", mnLens.CurFocal);
+  fprintf(outfile, "\tCurAp: f/%0.1f\n", mnLens.CurAp);
+  fprintf(outfile, "\tMaxAp @CurFocal: f/%0.1f\n", mnLens.MaxAp4CurFocal);
+  fprintf(outfile, "\tMinAp @CurFocal: f/%0.1f\n", mnLens.MinAp4CurFocal);
+
+  if (exifLens.makernotes.FocalLengthIn35mmFormat > 1.0f)
+    fprintf(outfile, "\tFocalLengthIn35mmFormat: %0.1f mm\n", exifLens.makernotes.FocalLengthIn35mmFormat);
+
+  if (exifLens.nikon.EffectiveMaxAp > 0.1f)
+    fprintf(outfile, "\tEffectiveMaxAp: f/%0.1f\n", exifLens.nikon.EffectiveMaxAp);
+
+  if (exifLens.makernotes.LensFStops > 0.1f)
+    fprintf(outfile, "\tLensFStops @CurFocal: %0.2f\n", exifLens.makernotes.LensFStops);
+
+  fprintf(outfile, "\tTeleconverterID: %lld\n", mnLens.TeleconverterID);
+  fprintf(outfile, "\tTeleconverter: %s\n", mnLens.Teleconverter);
+  fprintf(outfile, "\tAdapterID: %lld\n", mnLens.AdapterID);
+  fprintf(outfile, "\tAdapter: %s\n", mnLens.Adapter);
+  fprintf(outfile, "\tAttachmentID: %lld\n", mnLens.AttachmentID);
+  fprintf(outfile, "\tAttachment: %s\n", mnLens.Attachment);
+  fprintf(outfile, "\n");
+
+  fprintf(outfile, "ISO speed: %d\n", (int)P2.iso_speed);
+  if (P3.real_ISO > 0.1f)
+    fprintf(outfile, "real ISO speed: %d\n", (int)P3.real_ISO);
+  fprintf(outfile, "Shutter: ");
+  if (P2.shutter > 0 && P2.shutter < 1)
+    P2.shutter = fprintf(outfile, "1/%0.1f\n", 1.0f / P2.shutter);
+  else if (P2.shutter >= 1)
+    fprintf(outfile, "%0.1f sec\n", P2.shutter);
+  else /* negative*/
+    fprintf(outfile, " negative value\n");
+  fprintf(outfile, "Aperture: f/%0.1f\n", P2.aperture);
+  fprintf(outfile, "Focal length: %0.1f mm\n", P2.focal_len);
+  if (P3.exifAmbientTemperature > -273.15f)
+    fprintf(outfile, "Ambient temperature (exif data): %6.2f° C\n", P3.exifAmbientTemperature);
+  if (P3.CameraTemperature > -273.15f)
+    fprintf(outfile, "Camera temperature: %6.2f° C\n", P3.CameraTemperature);
+  if (P3.SensorTemperature > -273.15f)
+    fprintf(outfile, "Sensor temperature: %6.2f° C\n", P3.SensorTemperature);
+  if (P3.SensorTemperature2 > -273.15f)
+    fprintf(outfile, "Sensor temperature2: %6.2f° C\n", P3.SensorTemperature2);
+  if (P3.LensTemperature > -273.15f)
+    fprintf(outfile, "Lens temperature: %6.2f° C\n", P3.LensTemperature);
+  if (P3.AmbientTemperature > -273.15f)
+    fprintf(outfile, "Ambient temperature: %6.2f° C\n", P3.AmbientTemperature);
+  if (P3.BatteryTemperature > -273.15f)
+    fprintf(outfile, "Battery temperature: %6.2f° C\n", P3.BatteryTemperature);
+  if (P3.FlashGN > 1.0f)
+    fprintf(outfile, "Flash Guide Number: %6.2f\n", P3.FlashGN);
+  fprintf(outfile, "Flash exposure compensation: %0.2f EV\n", P3.FlashEC);
+  if (C.profile)
+    fprintf(outfile, "Embedded ICC profile: yes, %d bytes\n", C.profile_length);
+  else
+    fprintf(outfile, "Embedded ICC profile: no\n");
+
+  if (C.dng_levels.baseline_exposure > -999.f)
+    fprintf(outfile, "Baseline exposure: %04.3f\n", C.dng_levels.baseline_exposure);
+
+  fprintf(outfile, "Number of raw images: %d\n", P1.raw_count);
+
+  if (S.pixel_aspect != 1)
+    fprintf(outfile, "Pixel Aspect Ratio: %0.6f\n", S.pixel_aspect);
+  if (T.tlength)
+    fprintf(outfile, "Thumb size:  %4d x %d\n", T.twidth, T.theight);
+  fprintf(outfile, "Full size:   %4d x %d\n", S.raw_width, S.raw_height);
+
+  if (S.raw_inset_crop.cwidth)
+  {
+    fprintf(outfile, "Raw inset, width x height: %4d x %d ", S.raw_inset_crop.cwidth, S.raw_inset_crop.cheight);
+    if (S.raw_inset_crop.cleft != 0xffff)
+      fprintf(outfile, "left: %d ", S.raw_inset_crop.cleft);
+    if (S.raw_inset_crop.ctop != 0xffff)
+      fprintf(outfile, "top: %d", S.raw_inset_crop.ctop);
+    fprintf(outfile, "\n");
+  }
+
+  fprintf(outfile, "Image size:  %4d x %d\n", S.width, S.height);
+  fprintf(outfile, "Output size: %4d x %d\n", S.iwidth, S.iheight);
+  fprintf(outfile, "Image flip: %d\n", S.flip);
+
+  fprintf(outfile, "Raw colors: %d", P1.colors);
+  if (P1.filters)
+  {
+    fprintf(outfile, "\nFilter pattern: ");
+    if (!P1.cdesc[3])
+      P1.cdesc[3] = 'G';
+    for (int i = 0; i < 16; i++)
+      putchar(P1.cdesc[MyCoolRawProcessor.fcol(i >> 1, i & 1)]);
+  }
+
+  if (C.black)
+  {
+    fprintf(outfile, "\nblack: %d", C.black);
+  }
+  if (C.cblack[0] != 0)
+  {
+    fprintf(outfile, "\ncblack[0 .. 3]:");
+    for (int c = 0; c < 4; c++)
+      fprintf(outfile, " %d", C.cblack[c]);
+  }
+  if ((C.cblack[4] * C.cblack[5]) > 0)
+  {
+    fprintf(outfile, "\nBlackLevelRepeatDim: %d x %d\n", C.cblack[4], C.cblack[5]);
+    int n = C.cblack[4] * C.cblack[5];
+    fprintf(outfile, "cblack[6 .. %d]:", 6 + n - 1);
+    for (int c = 6; c < 6 + n; c++)
+      fprintf(outfile, " %d", C.cblack[c]);
+  }
+
+  if (C.linear_max[0] != 0)
+  {
+    fprintf(outfile, "\nHighlight linearity limits:");
+    for (int c = 0; c < 4; c++)
+      fprintf(outfile, " %ld", C.linear_max[c]);
+  }
+
+  if (P1.colors > 1)
+  {
+    fprintf(outfile, "\nMakernotes WB data:               coeffs                  EVs");
+    if ((C.cam_mul[0] > 0) && (C.cam_mul[1] > 0))
+    {
+      fprintf(outfile, "\n  %-23s   %g %g %g %g   %5.2f %5.2f %5.2f %5.2f", "As shot", C.cam_mul[0], C.cam_mul[1],
+              C.cam_mul[2], C.cam_mul[3], roundf(log2(C.cam_mul[0] / C.cam_mul[1]) * 100.0f) / 100.0f, 0.0f,
+              roundf(log2(C.cam_mul[2] / C.cam_mul[1]) * 100.0f) / 100.0f,
+              C.cam_mul[3] ? roundf(log2(C.cam_mul[3] / C.cam_mul[1]) * 100.0f) / 100.0f : 0.0f);
+    }
+
+    for (int cnt = 0; cnt < int(sizeof WBToStr / sizeof *WBToStr); cnt++)
+    {
+      WBi = WBToStr[cnt].NumId;
+      if ((C.WB_Coeffs[WBi][0] > 0) && (C.WB_Coeffs[WBi][1] > 0))
+      {
+        denom = (float)C.WB_Coeffs[WBi][1];
+        fprintf(outfile, "\n  %-23s   %4d %4d %4d %4d   %5.2f %5.2f %5.2f %5.2f", WBToStr[cnt].hrStrId,
+                C.WB_Coeffs[WBi][0], C.WB_Coeffs[WBi][1], C.WB_Coeffs[WBi][2], C.WB_Coeffs[WBi][3],
+                roundf(log2((float)C.WB_Coeffs[WBi][0] / denom) * 100.0f) / 100.0f, 0.0f,
+                roundf(log2((float)C.WB_Coeffs[WBi][2] / denom) * 100.0f) / 100.0f,
+                C.WB_Coeffs[3] ? roundf(log2((float)C.WB_Coeffs[WBi][3] / denom) * 100.0f) / 100.0f : 0.0f);
+      }
+    }
+
+    if (C.rgb_cam[0][0] > 0.0001)
+    {
+      fprintf(outfile, "\n\nCamera2RGB matrix (mode: %d):\n", MyCoolRawProcessor.imgdata.params.use_camera_matrix);
+      PRINTMATRIX3x4(outfile, C.rgb_cam, P1.colors);
+    }
+
+    fprintf(outfile, "\nXYZ->CamRGB matrix:\n");
+    PRINTMATRIX4x3(outfile, C.cam_xyz, P1.colors);
+
+    for (int cnt = 0; cnt < 2; cnt++)
+    {
+      if (fabsf(C.P1_color[cnt].romm_cam[0]) > 0)
+      {
+        fprintf(outfile, "\nPhaseOne Matrix %d:\n", cnt + 1);
+        for (int i = 0; i < 3; i++)
+          fprintf(outfile, "%6.4f\t%6.4f\t%6.4f\n", C.P1_color[cnt].romm_cam[i * 3],
+                  C.P1_color[cnt].romm_cam[i * 3 + 1], C.P1_color[cnt].romm_cam[i * 3 + 2]);
+      }
+    }
+
+    if (fabsf(C.cmatrix[0][0]) > 0)
+    {
+      fprintf(outfile, "\ncamRGB -> sRGB Matrix:\n");
+      PRINTMATRIX3x4(outfile, C.cmatrix, P1.colors);
+    }
+
+    if (fabsf(C.ccm[0][0]) > 0)
+    {
+      fprintf(outfile, "\nColor Correction Matrix:\n");
+      PRINTMATRIX3x4(outfile, C.ccm, P1.colors);
+    }
+
+    for (int cnt = 0; cnt < 2; cnt++)
+    {
+      if (C.dng_color[cnt].illuminant != LIBRAW_WBI_None)
+      {
+        if (C.dng_color[cnt].illuminant <= LIBRAW_WBI_StudioTungsten)
+        {
+          fprintf(outfile, "\nDNG Illuminant %d: %s", cnt + 1, WB_idx2hrstr(C.dng_color[cnt].illuminant));
+        }
+        else if (C.dng_color[cnt].illuminant == LIBRAW_WBI_Other)
+        {
+          fprintf(outfile, "\nDNG Illuminant %d: Other", cnt + 1);
+        }
+        else
+        {
+          fprintf(outfile,
+                  "\nDNG Illuminant %d is out of EXIF LightSources range "
+                  "[0:24, 255]: %d",
+                  cnt + 1, C.dng_color[cnt].illuminant);
+        }
+      }
+    }
+
+    for (int n = 0; n < 2; n++)
+    {
+      if (fabsf(C.dng_color[n].colormatrix[0][0]) > 0)
+      {
+        fprintf(outfile, "\nDNG color matrix %d:\n", n + 1);
+        PRINTMATRIX4x3(outfile, C.dng_color[n].colormatrix, P1.colors);
+      }
+    }
+
+    for (int n = 0; n < 2; n++)
+    {
+      if (fabsf(C.dng_color[n].calibration[0][0]) > 0)
+      {
+        fprintf(outfile, "\nDNG calibration matrix %d:\n", n + 1);
+        for (int i = 0; i < P1.colors && i < 4; i++)
+        {
+          for (int j = 0; j < P1.colors && j < 4; j++)
+            fprintf(outfile, "%6.4f\t", C.dng_color[n].calibration[j][i]);
+          fprintf(outfile, "\n");
+        }
+      }
+    }
+
+    for (int n = 0; n < 2; n++)
+    {
+      if (fabsf(C.dng_color[n].forwardmatrix[0][0]) > 0)
+      {
+        fprintf(outfile, "\nDNG forward matrix %d:\n", n + 1);
+        PRINTMATRIX3x4(outfile, C.dng_color[n].forwardmatrix, P1.colors);
+      }
+    }
+
+    fprintf(outfile, "\nDerived D65 multipliers:");
+    for (int c = 0; c < P1.colors; c++)
+      fprintf(outfile, " %f", C.pre_mul[c]);
+  }
+}
+
+void print_wbfun(FILE *outfile, LibRaw &MyCoolRawProcessor, std::string &fn)
+{
+  int WBi;
+  float denom;
+  fprintf(outfile, "// %s %s\n", P1.make, P1.model);
+  for (int cnt = 0; cnt < int(sizeof WBToStr / sizeof *WBToStr); cnt++)
+  {
+    WBi = WBToStr[cnt].NumId;
+    if (C.WB_Coeffs[WBi][0] && C.WB_Coeffs[WBi][1] && !WBToStr[cnt].aux_setting)
+    {
+      denom = (float)C.WB_Coeffs[WBi][1];
+      fprintf(outfile, "{\"%s\", \"%s\", %s, {%6.5ff, 1.0f, %6.5ff, ", P1.normalized_make, P1.normalized_model,
+              WBToStr[cnt].StrId, C.WB_Coeffs[WBi][0] / denom, C.WB_Coeffs[WBi][2] / denom);
+      if (C.WB_Coeffs[WBi][1] == C.WB_Coeffs[WBi][3])
+        fprintf(outfile, "1.0f}},\n");
+      else
+        fprintf(outfile, "%6.5ff}},\n", C.WB_Coeffs[WBi][3] / denom);
+    }
+  }
+
+  for (int cnt = 0; cnt < 64; cnt++)
+    if (C.WBCT_Coeffs[cnt][0])
+    {
+      fprintf(outfile, "{\"%s\", \"%s\", %d, {%6.5ff, 1.0f, %6.5ff, ", P1.normalized_make, P1.normalized_model,
+              (int)C.WBCT_Coeffs[cnt][0], C.WBCT_Coeffs[cnt][1] / C.WBCT_Coeffs[cnt][2],
+              C.WBCT_Coeffs[cnt][3] / C.WBCT_Coeffs[cnt][2]);
+      if (C.WBCT_Coeffs[cnt][2] == C.WBCT_Coeffs[cnt][4])
+        fprintf(outfile, "1.0f}},\n");
+      else
+        fprintf(outfile, "%6.5ff}},\n", C.WBCT_Coeffs[cnt][4] / C.WBCT_Coeffs[cnt][2]);
+    }
+    else
+      break;
+  fprintf(outfile, "\n");
+}
+
+void print_szfun(FILE *outfile, LibRaw &MyCoolRawProcessor, std::string &fn)
+{
+  fprintf(outfile, "%s\t%s\t%s\t%d\t%d\n", fn.c_str(), P1.make, P1.model, S.width, S.height);
+}
+
+void print_unpackfun(FILE *outfile, LibRaw &MyCoolRawProcessor, int print_frame, std::string &fn)
+{
+  char frame[48] = "";
+  if (print_frame)
+  {
+    ushort right_margin = S.raw_width - S.width - S.left_margin;
+    ushort bottom_margin = S.raw_height - S.height - S.top_margin;
+    snprintf(frame, 48, "F=%dx%dx%dx%d RS=%dx%d", S.left_margin, S.top_margin, right_margin, bottom_margin, S.raw_width,
+             S.raw_height);
+  }
+  fprintf(outfile, "%s\t%s\t%s\t%s/%s\n", fn.c_str(), MyCoolRawProcessor.unpack_function_name(), frame, P1.make,
+          P1.model);
 }
