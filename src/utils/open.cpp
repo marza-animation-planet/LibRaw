@@ -128,10 +128,10 @@ int LibRaw::open_file(const wchar_t *fname, INT64 max_buf_size)
 #endif
 #endif
 
-int LibRaw::open_buffer(void *buffer, size_t size)
+int LibRaw::open_buffer(const void *buffer, size_t size)
 {
   // this stream will close on recycle()
-  if (!buffer || buffer == (void *)-1)
+  if (!buffer || buffer == (const void *)-1)
     return LIBRAW_IO_ERROR;
 
   LibRaw_buffer_datastream *stream;
@@ -163,7 +163,7 @@ int LibRaw::open_buffer(void *buffer, size_t size)
   return ret;
 }
 
-int LibRaw::open_bayer(unsigned char *buffer, unsigned datalen,
+int LibRaw::open_bayer(const unsigned char *buffer, unsigned datalen,
                        ushort _raw_width, ushort _raw_height,
                        ushort _left_margin, ushort _top_margin,
                        ushort _right_margin, ushort _bottom_margin,
@@ -172,7 +172,7 @@ int LibRaw::open_bayer(unsigned char *buffer, unsigned datalen,
                        unsigned black_level)
 {
   // this stream will close on recycle()
-  if (!buffer || buffer == (void *)-1)
+  if (!buffer || buffer == (const void *)-1)
     return LIBRAW_IO_ERROR;
 
   LibRaw_buffer_datastream *stream;
