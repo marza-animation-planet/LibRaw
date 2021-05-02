@@ -170,18 +170,29 @@ def RequireLibraw(env):
         if with_lcms2:
             Lcms2Require(env)
 
+def GlobNoPH(pat):
+   def _flt(item):
+      bn = os.path.splitext(os.path.basename(str(item)))[0]
+      return (not bn.endswith("_ph"))
+   return filter(_flt, SCons.Script.Glob(pat))
+
 prjs.append({"name": LibrawName(),
              "type": "staticlib" if staticlib else "sharedlib",
              "alias": "libraw",
              "defs": defs,
              "cppflags": cppflags,
              "incdirs": [".", "libraw", out_incdir],
-             "srcs": ["internal/dcraw_common.cpp",
-                      "internal/dcraw_fileio.cpp",
-                      "internal/demosaic_packs.cpp",
-                      "src/libraw_cxx.cpp",
-                      "src/libraw_c_api.cpp",
-                      "src/libraw_datastream.cpp"],
+             "srcs": ["src/libraw_c_api.cpp", "src/libraw_datastream.cpp"] +
+                     GlobNoPH("src/decoders/*.cpp") +
+                     GlobNoPH("src/demosaic/*.cpp") +
+                     GlobNoPH("src/integration/*.cpp") +
+                     GlobNoPH("src/metadata/*.cpp") +
+                     GlobNoPH("src/postprocessing/*.cpp") +
+                     GlobNoPH("src/preprocessing/*.cpp") +
+                     GlobNoPH("src/tables/*.cpp") +
+                     GlobNoPH("src/utils/*.cpp") +
+                     GlobNoPH("src/write/*.cpp") +
+                     GlobNoPH("src/x3f/*.cpp"),
              "symvis": "default",
              "version": "%s.%s.%s" % (major, minor, patch),
              "soname": "lib%s.so.%s" % (LibrawName(), major),
