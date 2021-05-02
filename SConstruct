@@ -1,9 +1,10 @@
-import excons
-import sys
-import tarfile
 import os
-import glob
 import re
+import sys
+import glob
+import tarfile
+import excons
+import SCons.Script # pylint: disable=import-error
 
 
 env = excons.MakeBaseEnv()
@@ -27,27 +28,27 @@ cppflags = ""
 major = minor = patch = so_cur = so_rev = so_age = None
 with open("libraw/libraw_version.h", "r") as f:
     for l in f.readlines():
-        res = re.search("#define\sLIBRAW_MAJOR_VERSION\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_MAJOR_VERSION\s+(\d+)+", l)
         if res:
             major = res.group(1)
 
-        res = re.search("#define\sLIBRAW_MINOR_VERSION\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_MINOR_VERSION\s+(\d+)+", l)
         if res:
             minor = res.group(1)
 
-        res = re.search("#define\sLIBRAW_PATCH_VERSION\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_PATCH_VERSION\s+(\d+)+", l)
         if res:
             patch = res.group(1)
 
-        res = re.search("#define\sLIBRAW_SHLIB_CURRENT\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_SHLIB_CURRENT\s+(\d+)+", l)
         if res:
             so_cur = res.group(1)
 
-        res = re.search("#define\sLIBRAW_SHLIB_REVISION\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_SHLIB_REVISION\s+(\d+)+", l)
         if res:
             so_rev = res.group(1)
 
-        res = re.search("#define\sLIBRAW_SHLIB_AGE\s+(\d+)+", l)
+        res = re.search(r"#define\sLIBRAW_SHLIB_AGE\s+(\d+)+", l)
         if res:
             so_age = res.group(1)
 
@@ -98,11 +99,11 @@ if not rv["require"]:
         excons.PrintOnce("Build jpeg from sources ...")
         excons.Call("libjpeg-turbo", imp=["LibjpegName RequireLibjpeg"])
         def JpegRequire(env):
-            RequireLibjpeg(env, static=jpegStatic)
+            RequireLibjpeg(env, static=jpegStatic) # pylint: disable=undefined-variable
         # If we are to build lcms2 from sources, have it use this jpeg library
         lcms2_overrides["with-libjpeg"] = excons.OutputBaseDirectory()
         lcms2_overrides["libjpeg-static"] = (1 if jpegStatic else 0)
-        lcms2_overrides["libjpeg-name"] = LibjpegName(static=jpegStatic)
+        lcms2_overrides["libjpeg-name"] = LibjpegName(static=jpegStatic) # pylint: disable=undefined-variable
     else:
         def JpegRequire(env):
             pass
@@ -121,7 +122,7 @@ if not rv["require"]:
         excons.PrintOnce("Build lcms2 from sources ...")
         excons.Call("Little-CMS", overrides=lcms2_overrides, imp=["RequireLCMS2"])
         def Lcms2Require(env):
-            RequireLCMS2(env)
+            RequireLCMS2(env) # pylint: disable=undefined-variable
     else:
         def Lcms2Require(env):
             pass
@@ -214,4 +215,4 @@ excons.AddHelpTargets({"libraw-tests": ", ".join(tests)})
 
 excons.DeclareTargets(env, prjs)
 
-Export("LibrawName LibrawPath RequireLibraw")
+SCons.Script.Export("LibrawName LibrawPath RequireLibraw")
