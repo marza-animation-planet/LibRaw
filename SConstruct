@@ -79,68 +79,63 @@ if sys.platform != "win32":
 else:
     cppflags += " /wd4101"
 
-if staticlib:
-    defs.append("LIBRAW_NODLL")
-else:
-    defs.append("LIBRAW_BUILDLIB")
-
+if sys.platform == "win32":
+    if staticlib:
+        defs.append("LIBRAW_NODLL")
+    else:
+        defs.append("LIBRAW_BUILDLIB")
 
 lcms2_overrides = {}
+tiff_deps = []
 
-# jpeg setup
+if with_jpg:
+    # jpeg setup
+    def JpegLibname(static):
+        return "jpeg"
 
-def JpegLibname(static):
-    return "jpeg"
-
-rv = excons.ExternalLibRequire("libjpeg", libnameFunc=JpegLibname)
-if not rv["require"]:
-    if with_jpg:
+    rv = excons.ExternalLibRequire("libjpeg", libnameFunc=JpegLibname)
+    if not rv["require"]:
         jpegStatic = (excons.GetArgument("libjpeg-static", 1, int) != 0)
         excons.PrintOnce("Build jpeg from sources ...")
-        excons.Call("libjpeg-turbo", imp=["LibjpegName RequireLibjpeg"])
+        excons.Call("libjpeg-turbo", targets=["libjpeg"], imp=["LibjpegName", "LibjpegPath", "RequireLibjpeg"])
         def JpegRequire(env):
             RequireLibjpeg(env, static=jpegStatic) # pylint: disable=undefined-variable
         # If we are to build lcms2 from sources, have it use this jpeg library
         lcms2_overrides["with-libjpeg"] = excons.OutputBaseDirectory()
         lcms2_overrides["libjpeg-static"] = (1 if jpegStatic else 0)
         lcms2_overrides["libjpeg-name"] = LibjpegName(static=jpegStatic) # pylint: disable=undefined-variable
+        # lcms2 may build libtiff which also requires libjpeg, add libjpeg.cmake.outputs/libjpeg.automake.outputs
+        #   as a configure dependency to ensure libjpeg is fully built before libtiff is
+        if sys.platform == "win32":
+            tiff_deps.append(excons.cmake.OutputsCachePath("libjpeg"))
+        else:
+            tiff_deps.append(excons.automake.OutputsCachePath("libjpeg"))
     else:
-        def JpegRequire(env):
-            pass
-else:
-    JpegRequire = rv["require"]
+        JpegRequire = rv["require"]
 
-# LCMS2 setup
-
-def Lcms2Defines(static):
-    return (["CMS_DLL"] if not static else [])
-
-rv = excons.ExternalLibRequire("lcms2", definesFunc=Lcms2Defines)
-if not rv["require"]:
-    if with_lcms2:
-        lcms2Static = (excons.GetArgument("lcms2-static", 1, int) != 0)
-        excons.PrintOnce("Build lcms2 from sources ...")
-        excons.Call("Little-CMS", overrides=lcms2_overrides, imp=["RequireLCMS2"])
-        def Lcms2Require(env):
-            RequireLCMS2(env) # pylint: disable=undefined-variable
-    else:
-        def Lcms2Require(env):
-            pass
-else:
-    Lcms2Require = rv["require"]
-
-
-
-
-# libraw
-
-if with_jpg:
     defs += ["USE_JPEG"]
     customs += [JpegRequire]
 
 if with_lcms2:
+    # LCMS2 setup
+    def Lcms2Defines(static):
+        return (["CMS_DLL"] if not static else [])
+
+    rv = excons.ExternalLibRequire("lcms2", definesFunc=Lcms2Defines)
+    if not rv["require"]:
+        lcms2Static = (excons.GetArgument("lcms2-static", 1, int) != 0)
+        excons.PrintOnce("Build lcms2 from sources ...")
+        if with_jpg:
+            excons.cmake.AddConfigureDependencies("libtiff", tiff_deps)
+        excons.Call("Little-CMS", targets=["lcms2"], overrides=lcms2_overrides, imp=["RequireLCMS2", "LCMS2Path"])
+        def Lcms2Require(env):
+            RequireLCMS2(env) # pylint: disable=undefined-variable
+    else:
+        Lcms2Require = rv["require"]
+
     defs += ["USE_LCMS2"]
     customs += [Lcms2Require]
+
 
 def LibrawName():
     name = "raw" + libsuffix
@@ -157,7 +152,7 @@ def LibrawPath():
     return out_libdir + "/" + libname
 
 def RequireLibraw(env):
-    if staticlib:
+    if staticlib and sys.platform == "win32":
         env.Append(CPPDEFINES=["LIBRAW_NODLL"])
     if with_lcms2:
         env.Append(CPPDEFINES=["USE_LCMS2"])
@@ -183,16 +178,16 @@ prjs.append({"name": LibrawName(),
              "cppflags": cppflags,
              "incdirs": [".", "libraw", out_incdir],
              "srcs": ["src/libraw_c_api.cpp", "src/libraw_datastream.cpp"] +
-                     GlobNoPH("src/decoders/*.cpp") +
-                     GlobNoPH("src/demosaic/*.cpp") +
-                     GlobNoPH("src/integration/*.cpp") +
-                     GlobNoPH("src/metadata/*.cpp") +
-                     GlobNoPH("src/postprocessing/*.cpp") +
-                     GlobNoPH("src/preprocessing/*.cpp") +
-                     GlobNoPH("src/tables/*.cpp") +
-                     GlobNoPH("src/utils/*.cpp") +
-                     GlobNoPH("src/write/*.cpp") +
-                     GlobNoPH("src/x3f/*.cpp"),
+                      GlobNoPH("src/decoders/*.cpp") +
+                      GlobNoPH("src/demosaic/*.cpp") +
+                      GlobNoPH("src/integration/*.cpp") +
+                      GlobNoPH("src/metadata/*.cpp") +
+                      GlobNoPH("src/postprocessing/*.cpp") +
+                      GlobNoPH("src/preprocessing/*.cpp") +
+                      GlobNoPH("src/tables/*.cpp") +
+                      GlobNoPH("src/utils/*.cpp") +
+                      GlobNoPH("src/write/*.cpp") +
+                      GlobNoPH("src/x3f/*.cpp"),
              "symvis": "default",
              "version": "%s.%s.%s" % (major, minor, patch),
              "soname": "lib%s.so.%s" % (LibrawName(), major),
@@ -206,6 +201,12 @@ for sam in excons.glob("samples/*.cpp"):
         if sys.platform == "win32":
             continue
 
+    customs = [RequireLibraw]
+    if "mem_image_sample" in sam and not staticlib and with_jpg:
+        # mem_image_sample uses libjpeg directly but linking libraw dynamically
+        # -> require jpeg library explicitely
+        customs.append(JpegRequire)
+
     base = os.path.splitext(os.path.basename(sam))[0]
     tests.append(base)
     prjs.append({"name": base,
@@ -215,7 +216,7 @@ for sam in excons.glob("samples/*.cpp"):
                  "incdirs": [out_incdir],
                  "defs": defs,
                  "srcs": [sam],
-                 "custom": [RequireLibraw]})
+                 "custom": customs})
 
 excons.AddHelpOptions(libraw="""LIBRAW OPTIONS
   libraw-static=0|1     : Toggle between static and shared library build [1]
