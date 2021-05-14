@@ -77,7 +77,30 @@ if sys.platform != "win32":
         cppflags += " -Wno-deprecated-declarations"
 
 else:
-    cppflags += " /wd4101"
+    # 4101: ?
+    # 4706: assignment within conditional expression
+    # 4702: unreachable code
+    # 4244: conversion from X to Y, possible loss of data
+    # 4267: conversion from X to Y, possible loss of data
+    # 4389: signed/unsigned mismatch (assignment)
+    # 4018: signed/unsigned mismatch (comparison)
+    # 4305: truncation from 'double' to 'float'
+    # 4127: conditional expression is constant
+    # 4819: The file contains a character that cannot be represented in the current code page
+    # 4146: unary minus operator applied to unsigned type, result still unsigned
+    # 4804: unsafe use of type 'bool' in operation
+    # 4100: unreferenced formal parameter
+    # 4005: macro redefinition
+    # 4456: declaration of X hides previous local declaration
+    # 4838: conversion from X to Y requires a narrowing conversion
+    # 4701: potentially uninitialized local variable X used
+    # 4245: conversion from X to Y, signed/unsigned mismatch
+    # 4458: declaration of X hides class member
+    # 4324: structure was padded due to alignment specifier
+    # 4703: potentially uninitialized local pointer variable 'LensData_buf' used
+    # 4457: declaration of X hides function parameter
+    # 4611: interaction between '_setjmp' and C++ object destruction is non-portable
+    cppflags += " /wd4324 /wd4703 /wd4457 /wd4611 /wd4458 /wd4245 /wd4101 /wd4706 /wd4702 /wd4244 /wd4389 /wd4305 /wd4127 /wd4819 /wd4018 /wd4146 /wd4804 /wd4100 /wd4005 /wd4456 /wd4267 /wd4838 /wd4701"
 
 if sys.platform == "win32":
     if staticlib:
