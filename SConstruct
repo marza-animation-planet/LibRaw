@@ -211,7 +211,6 @@ prjs.append({"name": LibrawName(),
                       GlobNoPH("src/utils/*.cpp") +
                       GlobNoPH("src/write/*.cpp") +
                       GlobNoPH("src/x3f/*.cpp"),
-             "symvis": "default",
              "version": "%s.%s.%s" % (major, minor, patch),
              "soname": "lib%s.so.%s" % (LibrawName(), major),
              "install_name": "lib%s.%s.dylib" % (LibrawName(), major),
