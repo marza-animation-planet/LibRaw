@@ -1,9 +1,9 @@
 [submodule "excons"]
 	path = excons
-	url = https://github.com/gatgui/excons.git
+	url = git@github.com:marza-animation-planet/excons.git
 [submodule "libjpeg-turbo"]
 	path = libjpeg-turbo
-	url = https://github.com/gatgui/libjpeg-turbo.git
+	url = git@github.com:marza-animation-planet/libjpeg-turbo.git
 [submodule "Little-CMS"]
 	path = Little-CMS
-	url = git://github.com/gatgui/Little-CMS
+	url = git@github.com:marza-animation-planet/Little-CMS
